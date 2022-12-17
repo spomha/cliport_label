@@ -60,6 +60,9 @@ branch = true
 python = "^3.8"
 libadvian = "^1.0"
 click = "^8.0"
+opencv-contrib-python = "^4.6.0.66"
+numpy = "^1.23.5"
+rospkg = "^1.4.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.1"
