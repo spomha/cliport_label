@@ -1,0 +1,18 @@
+[controlkeys]
+rgb = "a"
+depth = "d"
+snapshot = "s"
+clear_pick = "1"
+clear_place = "2"
+save = "S"
+quit = "q"
+pick = "p"
+place = "l"
+open_gripper = "o"
+close_gripper = "k"
+home = "h"
+stop_execution = "b"
+
+[taskexecutor]
+enable = false
+enable_gripper = true

@@ -5,8 +5,7 @@ import cv2
 import numpy as np
 import rospy
 
-from cliport_label.taskexecutor import TaskInfo, TaskExecutor
-from cliport_label.camera import CameraStream
+from cliport_label.taskexecutor import TaskInfo
 from cliport_label.utils import get_line_theta, draw_on_disp_img
 
 class StreamType(Enum):
@@ -23,7 +22,7 @@ class ToolType(Enum):
 class GUI:
     """Visualize and interact with camera stream and snapshot window"""
 
-    def __init__(self) -> None:
+    def __init__(self, config, streamer, taskexecutor) -> None:
         """Initialize stuff"""
         self.stream_win = "stream"
         self.snapshot_win = "snapped_observation"
@@ -32,9 +31,13 @@ class GUI:
         self.pick_data = {'rotation': 0, 'bbox': [], 'rotline': []}
         self.place_data = {'rotation': 0, 'bbox': [], 'rotline': []}
         self.selected_tool = ToolType.PICKBBOX
-        self.task = TaskExecutor()
+        self.task = taskexecutor
+        self.streamer = streamer
+        self.controls = config["controlkeys"]
         # Number of discrete rotation angles
         self.rotation_angles = 10
+        if self.task is not None:
+            self.task.rotation_angles = self.rotation_angles
         cv2.namedWindow(self.snapshot_win, cv2.WINDOW_AUTOSIZE | cv2.WINDOW_GUI_NORMAL)
         cv2.namedWindow(self.stream_win)
         # highgui function called when mouse events occur
@@ -43,32 +46,49 @@ class GUI:
     def cleanup(self):
         """Release resources"""
         cv2.destroyAllWindows()
+        if self.task:
+            self.task.cleanup()
 
-    def run(self, streamer: CameraStream) -> None:
+    def run(self) -> None:
         """Run GUI"""
-        self.handle_stream(streamer)
+        self.handle_stream()
         if self.snapshot:
             self.handle_snapshot()
         key_press = cv2.waitKey(1) & 0xFF
-        self.handle_keypress(streamer, key_press)
+        self.handle_keypress(key_press)
 
-    def handle_stream(self, streamer: CameraStream) -> None:
+    def depth_to_heatmap(self, depth) -> None:
+        """Normalize depth image to color heatmap for display"""
+        valid = (depth != 0)
+        ranged = (depth - np.min(depth)) / (np.max(depth) - np.min(depth)) # dmin -> 0.0, dmax -> 1.0
+        ranged[ranged < 0] = 0 # saturate
+        ranged[ranged > 1] = 1
+        output = 1.0 - ranged # 0 -> white, 1 -> black
+        output[~valid] = 0 # black out invalid
+        output **= 1/2.2 # most picture data is gamma-compressed
+        output = cv2.normalize(output, output, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+        output = cv2.applyColorMap(output, cv2.COLORMAP_JET)
+        
+        return output
+
+    def handle_stream(self) -> None:
         """Display and interact with stream window"""
-        if streamer.rgb is not None and self.stream_type is StreamType.RGB:
+        if self.streamer.rgb is not None and self.stream_type is StreamType.RGB:
             # OpenCV handles bgr format instead of rgb so we convert first
-            bgr = cv2.cvtColor(streamer.rgb, cv2.COLOR_RGB2BGR)
+            bgr = cv2.cvtColor(self.streamer.rgb, cv2.COLOR_RGB2BGR)
             cv2.imshow(self.stream_win, bgr)
-        if streamer.depth is not None and self.stream_type is StreamType.DEPTH:
-            cv2.imshow(self.stream_win, streamer.depth)
+        if self.streamer.depth is not None and self.stream_type is StreamType.DEPTH:
+            cv2.imshow(self.stream_win, self.depth_to_heatmap(self.streamer.depth))
 
     def handle_snapshot(self) -> None:
         """Display and interact with snapshot"""  
         snap_type = self.stream_type is not StreamType.RGB
         disp_img = self.snapshot[snap_type]
-        # convert depth mono channel to bgr so we can display colored bbox
+        # convert mono depth to color heatmap before displaying
         if self.snapshot[snap_type].ndim == 2:
-            disp_img = cv2.cvtColor(disp_img, cv2.COLOR_GRAY2RGB)
-        disp_img = cv2.cvtColor(disp_img, cv2.COLOR_RGB2BGR)
+            disp_img = self.depth_to_heatmap(disp_img)
+        else:
+            disp_img = cv2.cvtColor(disp_img, cv2.COLOR_RGB2BGR)
         # Draw and display image
         rot_color = (0, 0, np.iinfo(disp_img.dtype).max)
         pick_bbox_color = (0, np.iinfo(disp_img.dtype).max, 0)
@@ -77,42 +97,53 @@ class GUI:
         draw_on_disp_img(disp_img,self.place_data, place_bbox_color, rot_color)
         cv2.imshow(self.snapshot_win, disp_img)
 
-    def handle_keypress(self, streamer, key_press) -> None:
+    def handle_keypress(self, key_press) -> None:
         """Handle keypress in gui window"""
         # Stream related controls
-        if key_press == ord('a'):
+        if key_press == ord(self.controls['rgb']):
             self.stream_type = StreamType.RGB
-        if key_press == ord('d'):
+        if key_press == ord(self.controls['depth']):
             self.stream_type = StreamType.DEPTH
-        if key_press == ord('s'):
-            self.snapshot = (streamer.rgb.copy(), streamer.depth.copy())
+        if key_press == ord(self.controls['snapshot']):
+            self.snapshot = (self.streamer.rgb.copy(), self.streamer.depth.copy())
             rospy.loginfo("Capturing snapshot from camera stream")
         # Snapshot related controls
-        if key_press == ord('1'):
+        if key_press == ord(self.controls['clear_pick']):
             self.pick_data = {'rotation': 0, 'bbox': [], 'rotline': []}
             rospy.loginfo("Clearing up pick data")
-        if key_press == ord('2'):
+        if key_press == ord(self.controls['clear_place']):
             self.place_data = {'rotation': 0, 'bbox': [], 'rotline': []}
             rospy.loginfo("Clearing up place data")
-        if key_press == ord('p'):
-            data = self.pick_data
-            if len(data['bbox']) == 2 and len(data['rotline']) == 2:
-                tinfo = TaskInfo(self.snapshot[0], self.snapshot[1], data['bbox'], data['rotation'])
-                rospy.loginfo("Executing pick task")
-                self.task.pick(tinfo)
-        if key_press == ord('l'):
-            data = self.place_data
-            if len(data['bbox']) == 2 and len(data['rotline']) == 2:
-                tinfo = TaskInfo(self.snapshot[0], self.snapshot[1], data['bbox'], data['rotation'])
-                rospy.loginfo("Executing place task")
-                self.task.place(tinfo)
-        if key_press == ord('h'):
-            rospy.loginfo("Executing home task")
-            self.task.home()
-        if key_press == ord('S'):
+        if key_press == ord(self.controls['save']):
             rospy.loginfo("Saving demonstration...")
-        if key_press == ord('q'):
+        if key_press == ord(self.controls['quit']):
             raise KeyboardInterrupt
+        # Ignore task executor related commands if its set to None
+        if self.task is not None:
+            if key_press == ord(self.controls['pick']):
+                data = self.pick_data
+                if len(data['bbox']) == 2 and len(data['rotline']) == 2:
+                    tinfo = TaskInfo(self.snapshot[0], self.snapshot[1], data['bbox'], data['rotation'])
+                    rospy.loginfo("Executing pick task")
+                    self.task.pick(tinfo)
+            if key_press == ord(self.controls['place']):
+                data = self.place_data
+                if len(data['bbox']) == 2 and len(data['rotline']) == 2:
+                    tinfo = TaskInfo(self.snapshot[0], self.snapshot[1], data['bbox'], data['rotation'])
+                    rospy.loginfo("Executing place task")
+                    self.task.place(tinfo)
+            if key_press == ord(self.controls['open_gripper']):
+                rospy.loginfo("Opening gripper")
+                self.task.open_gripper()
+            if key_press == ord(self.controls['close_gripper']):
+                rospy.loginfo("Closing gripper")
+                self.task.close_gripper()
+            if key_press == ord(self.controls['home']):
+                rospy.loginfo("Executing home task")
+                self.task.home()
+            if key_press == ord(self.controls['stop_execution']):
+                rospy.loginfo("Stopping all execution")
+                self.task.stop()
 
     def get_coords(self, action, x, y, flags, *userdata) -> None:
         """Mouse callback function which is used to collect bbox coords"""
