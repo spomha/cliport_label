@@ -28,6 +28,7 @@ class GUI:
         self.snapshot_win = "snapped_observation"
         self.stream_type = StreamType.RGB
         self.snapshot = None
+        self.lang_goal = ""
         self.pick_data = {'rotation': 0, 'bbox': [], 'rotline': []}
         self.place_data = {'rotation': 0, 'bbox': [], 'rotline': []}
         self.selected_tool = ToolType.PICKBBOX
@@ -116,6 +117,9 @@ class GUI:
             rospy.loginfo("Clearing up place data")
         if key_press == ord(self.controls['save']):
             rospy.loginfo("Saving demonstration...")
+        if key_press == ord(self.controls['lang_goal']):
+            self.lang_goal = input("Enter language goal: ")
+            rospy.loginfo(f"Setting {self.lang_goal = } for demonstration...")
         if key_press == ord(self.controls['quit']):
             raise KeyboardInterrupt
         # Ignore task executor related commands if its set to None
