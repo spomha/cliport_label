@@ -31,7 +31,21 @@ def get_line_theta(bbox, cursor):
         theta = theta + 360
     return line, theta
 
-def draw_on_disp_img(img, data, bbox_color, rot_color) -> None:
+def depth_to_heatmap(depth) -> None:
+    """Normalize depth image to color heatmap for display"""
+    valid = (depth != 0)
+    ranged = (depth - np.min(depth)) / (np.max(depth) - np.min(depth)) # dmin -> 0.0, dmax -> 1.0
+    ranged[ranged < 0] = 0 # saturate
+    ranged[ranged > 1] = 1
+    output = 1.0 - ranged # 0 -> white, 1 -> black
+    output[~valid] = 0 # black out invalid
+    output **= 1/2.2 # most picture data is gamma-compressed
+    output = cv2.normalize(output, output, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+    output = cv2.applyColorMap(output, cv2.COLORMAP_JET)
+    
+    return output
+
+def draw_on_disp_img(img, data, bbox_color, rot_color, lang_goal = None) -> None:
     """Draw on display image of snapshot given pick/place data"""
     # Draw bbox
     if len(data['bbox']) == 2:
@@ -46,7 +60,13 @@ def draw_on_disp_img(img, data, bbox_color, rot_color) -> None:
             tx = origin[0] - width//2
             ty = np.max([0, origin[1] - height//2 - 10])
             cv2.putText(img, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bbox_color, 2, cv2.LINE_AA)
-
+        if lang_goal is not None:
+            height, width = img.shape[:2]
+            ty = height - 10
+            tx = 10
+            max_intensity = np.iinfo(img.dtype).max
+            color = (max_intensity, max_intensity, max_intensity)
+            cv2.putText(img, lang_goal, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2, cv2.LINE_AA)
 
 def get_pointcloud(depth, intrinsics):
     """Get 3D pointcloud from perspective depth image.

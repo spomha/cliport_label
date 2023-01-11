@@ -1,12 +1,14 @@
 """GUI for label tool"""
 from enum import Enum
+from pathlib import Path
+import pickle
 
 import cv2
 import numpy as np
 import rospy
 
 from cliport_label.taskexecutor import TaskInfo
-from cliport_label.utils import get_line_theta, draw_on_disp_img
+from cliport_label.utils import get_line_theta, depth_to_heatmap, draw_on_disp_img
 
 class StreamType(Enum):
     RGB = 0
@@ -19,7 +21,7 @@ class ToolType(Enum):
     PLACEROTATE = 3
     NONE = 4
 
-class GUI:
+class ToolGUI:
     """Visualize and interact with camera stream and snapshot window"""
 
     def __init__(self, config, streamer, taskexecutor) -> None:
@@ -34,7 +36,8 @@ class GUI:
         self.selected_tool = ToolType.PICKBBOX
         self.task = taskexecutor
         self.streamer = streamer
-        self.controls = config["controlkeys"]
+        self.controls = config["tool_controlkeys"]
+        self.output = config['output']
         # Number of discrete rotation angles
         self.rotation_angles = 10
         if self.task is not None:
@@ -58,20 +61,6 @@ class GUI:
         key_press = cv2.waitKey(1) & 0xFF
         self.handle_keypress(key_press)
 
-    def depth_to_heatmap(self, depth) -> None:
-        """Normalize depth image to color heatmap for display"""
-        valid = (depth != 0)
-        ranged = (depth - np.min(depth)) / (np.max(depth) - np.min(depth)) # dmin -> 0.0, dmax -> 1.0
-        ranged[ranged < 0] = 0 # saturate
-        ranged[ranged > 1] = 1
-        output = 1.0 - ranged # 0 -> white, 1 -> black
-        output[~valid] = 0 # black out invalid
-        output **= 1/2.2 # most picture data is gamma-compressed
-        output = cv2.normalize(output, output, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-        output = cv2.applyColorMap(output, cv2.COLORMAP_JET)
-        
-        return output
-
     def handle_stream(self) -> None:
         """Display and interact with stream window"""
         if self.streamer.rgb is not None and self.stream_type is StreamType.RGB:
@@ -79,7 +68,7 @@ class GUI:
             bgr = cv2.cvtColor(self.streamer.rgb, cv2.COLOR_RGB2BGR)
             cv2.imshow(self.stream_win, bgr)
         if self.streamer.depth is not None and self.stream_type is StreamType.DEPTH:
-            cv2.imshow(self.stream_win, self.depth_to_heatmap(self.streamer.depth))
+            cv2.imshow(self.stream_win, depth_to_heatmap(self.streamer.depth))
 
     def handle_snapshot(self) -> None:
         """Display and interact with snapshot"""  
@@ -87,7 +76,7 @@ class GUI:
         disp_img = self.snapshot[snap_type]
         # convert mono depth to color heatmap before displaying
         if self.snapshot[snap_type].ndim == 2:
-            disp_img = self.depth_to_heatmap(disp_img)
+            disp_img = depth_to_heatmap(disp_img)
         else:
             disp_img = cv2.cvtColor(disp_img, cv2.COLOR_RGB2BGR)
         # Draw and display image
@@ -116,7 +105,7 @@ class GUI:
             self.place_data = {'rotation': 0, 'bbox': [], 'rotline': []}
             rospy.loginfo("Clearing up place data")
         if key_press == ord(self.controls['save']):
-            rospy.loginfo("Saving demonstration...")
+            self.save_demo()
         if key_press == ord(self.controls['lang_goal']):
             self.lang_goal = input("Enter language goal: ")
             rospy.loginfo(f"Setting {self.lang_goal = } for demonstration...")
@@ -148,6 +137,34 @@ class GUI:
             if key_press == ord(self.controls['stop_execution']):
                 rospy.loginfo("Stopping all execution")
                 self.task.stop()
+
+    def save_demo(self) -> None:
+        """Save demonstration data"""
+        if self.lang_goal == "":
+            rospy.logwarn("Language goal must be set to save demonstration")
+            return
+        if self.snapshot is None or len(self.snapshot) != 2:
+            rospy.logwarn("Valid snapshot pair (RGB-D) is not found")
+            return
+        if self.task is None:
+            rospy.logwarn("Task executor is not set")
+            return
+        if self.task.pick_pose is None or self.task.place_pose is None:
+            rospy.logwarn("Action pair (pick-place) pose not found")
+            return
+        action = {'pose0': self.task.pick_pose, 'pose1': self.task.place_pose}
+        color, depth = self.snapshot[0], self.snapshot[1]
+        info = {'lang_goal': self.lang_goal, 'pick_data': self.pick_data, 'place_data': self.place_data}
+        
+        out_data = {'color': color, 'depth': depth, 'info': info, 'action': action}
+        filepath = Path(self.output['directory'],self.output['taskname'])
+        filename = f"{(len(list(Path(filepath).rglob('*'))) +1):04d}.pkl"
+        Path(filepath).mkdir(exist_ok=True, parents=True)
+        with open(Path(filepath, filename), "wb") as fd:
+            pickle.dump(out_data, fd)   
+        rospy.loginfo("Saving demonstration...")
+        # Reset lang goal for next demonstration
+        self.lang_goal = ""
 
     def get_coords(self, action, x, y, flags, *userdata) -> None:
         """Mouse callback function which is used to collect bbox coords"""
@@ -194,3 +211,80 @@ class GUI:
                 line, theta = get_line_theta(data['bbox'], (x,y))
                 data['rotation'] = int(theta // self.rotation_angles)
                 data['rotline'] = line
+
+
+class ViewerGUI:
+    """Data viewer gui class"""
+
+    def __init__(self, config) -> None:
+        """Initialize class"""
+        self.viewer_win = "viewer"
+        self.stream_type = StreamType.RGB
+        files = list(Path(config['output']['directory'], config['output']['taskname']).rglob('*.pkl'))
+        files.sort()
+        if len(files) == 0:
+            raise KeyboardInterrupt("No data file found for viewing")
+        self.data = []
+        for file in files:
+            with open(file, "rb") as fd:
+                data = pickle.load(fd)
+                data['filename'] = file.stem
+                self.data.append(data)
+        self.controls = config["viewer_controlkeys"]
+        self.current_idx = 0
+        self.max_idx = len(self.data) - 1
+        cv2.namedWindow(self.viewer_win)
+
+    def cleanup(self):
+        """Release resources"""
+        cv2.destroyAllWindows()
+
+    def run(self) -> None:
+        """Run GUI"""
+        self.handle_viewer()
+        key_press = cv2.waitKey(1) & 0xFF
+        self.handle_keypress(key_press)
+
+    def handle_viewer(self) -> None:
+        """Handle viewing logic"""
+        snap_type = self.stream_type is not StreamType.RGB
+        data = self.data[self.current_idx]
+        filename = data['filename']
+        snapshot = [data['color'], data['depth']]
+        pick_data = data['info']['pick_data']
+        place_data = data['info']['place_data']
+        lang_goal = data['info']['lang_goal']
+
+        # info = {'lang_goal': self.lang_goal, 'pick_data': self.pick_data, 'place_data': self.place_data}
+        
+        # out_data = {'color': color, 'depth': depth, 'info': info, 'action': action}
+
+        disp_img = snapshot[snap_type]
+        # convert mono depth to color heatmap before displaying
+        if snapshot[snap_type].ndim == 2:
+            disp_img = depth_to_heatmap(disp_img)
+        else:
+            disp_img = cv2.cvtColor(disp_img, cv2.COLOR_RGB2BGR)
+        # Draw and display image
+        rot_color = (0, 0, np.iinfo(disp_img.dtype).max)
+        pick_bbox_color = (0, np.iinfo(disp_img.dtype).max, 0)
+        place_bbox_color = (np.iinfo(disp_img.dtype).max, 0, 0)
+        draw_on_disp_img(disp_img, pick_data, pick_bbox_color, rot_color)
+        draw_on_disp_img(disp_img, place_data, place_bbox_color, rot_color, f"{filename}: {lang_goal}")
+        cv2.imshow(self.viewer_win, disp_img)
+
+
+    def handle_keypress(self, key_press) -> None:
+        """Handle keypress logic"""
+        if key_press == ord(self.controls['rgb']):
+            self.stream_type = StreamType.RGB
+        if key_press == ord(self.controls['depth']):
+            self.stream_type = StreamType.DEPTH
+        if key_press == ord(self.controls['next']):
+            if self.current_idx < self.max_idx:
+                self.current_idx += 1
+        if key_press == ord(self.controls['previous']):
+            if self.current_idx > 0:
+                self.current_idx -= 1
+        if key_press == ord(self.controls['quit']):
+            raise KeyboardInterrupt

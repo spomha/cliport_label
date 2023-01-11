@@ -83,7 +83,9 @@ class TaskExecutor:
         self.extrinsic = {
             'xyz': transform[0],
             'quaternion': transform[1]
-        } 
+        }
+        # Our Pick-Place action pose
+        self.pick_pose = self.place_pose = None 
         rospy.loginfo(f"Camera intrinsic: {self.intrinsic}")
         rospy.loginfo(f"Camera-to-base extrinsic: {self.extrinsic}")
         # Bring robot to home position during initialization
@@ -117,8 +119,11 @@ class TaskExecutor:
 
     def pick(self, data: TaskInfo):
         """Execute pick task"""
+        # Reset our previous pose
+        self.pick_pose = None
         # This is used to execute up-down movement when grasping the target
-        z_offset = 0.035
+        z_offset_up = 0.035
+        z_offset_down = 0.015
         # Clear existing execution and start pick task from home
         self.stop()
         self.home()
@@ -144,28 +149,33 @@ class TaskExecutor:
         # Move above object and open gripper
         rospy.loginfo("Moving towards pick object and opening gripper")
         pose_up = copy.deepcopy(pose)
-        pose_up.position.z += z_offset
+        pose_up.position.z += z_offset_up
         self.execute_cartesian_path([pose_up])
         self.open_gripper()
         # Move down and grasp object
         rospy.loginfo("Moving down and grasping pick object")
         pose_down = copy.deepcopy(pose)
-        pose_down.position.z -= z_offset
+        pose_down.position.z -= z_offset_down
         self.execute_cartesian_path([pose_down])
         self.close_gripper()
         # Move up again
         rospy.loginfo("Moving up again after picking object")
         self.execute_cartesian_path([pose_up])
+        self.pick_pose = (target_xyz, target_wxyz)
     
     def place(self, data: TaskInfo):
         """Execute place task"""
-        # This is used to execute up-down movement when grasping the target
-        z_offset = 0.035
+        # Reset our previous pose
+        self.place_pose = None
+        # This is used to move up by given offset from the z value of object
+        z_offset_up = 0.15
         # Clear existing execution and start pick task from home
         self.stop()
         self.home()
         # Get target position and orientation
         target_xyz, camera_xyz = get_avg_3d_centroid(data.img_depth, data.bbox, self.intrinsic, self.extrinsic)
+        # We add Z offset in our xyz
+        target_xyz[2] += z_offset_up
         rospy.loginfo(f"{camera_xyz = }")
         rospy.loginfo(f"{target_xyz = }")
         ee_wxyz = [self.default_ee_pose.pose.orientation.w,
@@ -185,10 +195,9 @@ class TaskExecutor:
 
         # Move above object and open gripper
         rospy.loginfo("Moving towards place object and opening gripper")
-        pose_up = copy.deepcopy(pose)
-        pose_up.position.z += z_offset
-        self.execute_cartesian_path([pose_up])
+        self.execute_cartesian_path([pose])
         self.open_gripper()
+        self.place_pose = (target_xyz, target_wxyz)
 
 
     def feedback_callback(self, data):

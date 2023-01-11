@@ -1,10 +1,15 @@
-[controlkeys]
+[output]
+# For packing_task, z_offset_up = 0.15 in place, and z_offset_up/down = 0.035,0.015 respectively for pick
+taskname = "packing_task"
+directory = "./data/"
+
+[tool_controlkeys]
 rgb = "a"
 depth = "d"
 snapshot = "s"
 clear_pick = "1"
 clear_place = "2"
-save = "S"
+save = "x"
 lang_goal = "i"
 quit = "q"
 pick = "p"
@@ -14,6 +19,13 @@ close_gripper = "k"
 home = "h"
 stop_execution = "b"
 
+[viewer_controlkeys]
+rgb = "a"
+depth = "d"
+next = "l"
+previous = "j"
+quit = "q"
+
 [taskexecutor]
-enable = false
+enable = true
 enable_gripper = true
